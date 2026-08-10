@@ -19,7 +19,11 @@ void llama_model_bailingmoe3::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_KV_LORA_RANK,      hparams.n_lora_kv);
     ml.get_key(LLM_KV_SSM_CONV_KERNEL,             hparams.ssm_d_conv);
     ml.get_key(LLM_KV_KDA_HEAD_DIM,                hparams.n_embd_head_kda);
-    ml.get_key(LLM_KV_KDA_GATE_LOWER_BOUND,        hparams.kda_gate_lower_bound);
+    if (!ml.get_key(LLM_KV_KDA_GATE_LOWER_BOUND, hparams.kda_gate_lower_bound, false)) {
+        // absent in legacy "bailing-hybrid" GGUFs (aj9o9/Ling-3.0-flash-GGUF);
+        // trained value from inclusionAI/Ling-3.0-flash config (kda_lower_bound)
+        hparams.kda_gate_lower_bound = -5.0f;
+    }
 
     // n_head_kv == 0 marks the KDA (recurrent) layers, the rest are full attention
     for (uint32_t i = 0; i < hparams.n_layer(); ++i) {
@@ -259,6 +263,10 @@ llama_model_bailingmoe3::graph::graph(const llama_model & model, const llm_graph
             g1 = ggml_reshape_3d(ctx0, g1, head_dim, n_head, n_tokens);
 
             ggml_tensor * A = ggml_reshape_3d(ctx0, layer.ssm_a, 1, n_head, 1);
+            if (arch == LLM_ARCH_BAILINGHOE3_LEGACY) {
+                // legacy "bailing-hybrid" GGUFs store raw A_log; exp() it in-graph
+                A = ggml_exp(ctx0, A);
+            }
             g1 = ggml_mul(ctx0, g1, A);
             g1 = ggml_sigmoid(ctx0, g1);
             g1 = ggml_scale(ctx0, g1, hparams.kda_gate_lower_bound);

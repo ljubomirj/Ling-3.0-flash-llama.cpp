@@ -412,7 +412,17 @@ namespace GGUFMeta {
         const struct llama_model_kv_override * override =
             it != kv_overrides.end() ? &it->second : nullptr;
 
-        const bool found = GGUFMeta::GKV<T>::set(metadata, key, result, override);
+        bool found = GGUFMeta::GKV<T>::set(metadata, key, result, override);
+
+        if (!found && llm_kv.arch == LLM_ARCH_BAILINGHOE3_LEGACY) {
+            // early BailingMoeV3 GGUFs store all keys under "bailing-hybrid.*" but the loader's
+            // kv prefix is the canonical "bailingmoe3.*"; retry with the legacy prefix
+            const std::string legacy_key = "bailing-hybrid" + key.substr(strlen("bailingmoe3"));
+            found = GGUFMeta::GKV<T>::set(metadata, legacy_key, result, override);
+            if (found) {
+                LLAMA_LOG_INFO("%s: using legacy bailing-hybrid key '%s' for '%s'\n", __func__, legacy_key.c_str(), key.c_str());
+            }
+        }
 
         if (required && !found) {
             throw std::runtime_error(format("key not found in model: %s", key.c_str()));

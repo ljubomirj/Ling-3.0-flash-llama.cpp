@@ -311,6 +311,7 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
         case LLM_ARCH_KIMI_LINEAR:
             return new llama_model_kimi_linear(params);
         case LLM_ARCH_BAILINGMOE3:
+        case LLM_ARCH_BAILINGHOE3_LEGACY:
             return new llama_model_bailingmoe3(params);
         case LLM_ARCH_KIMI_K3:
             return new llama_model_kimi_k3(params);
@@ -2614,6 +2615,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_GRANITE_HYBRID:
         case LLM_ARCH_CHAMELEON:
         case LLM_ARCH_BAILINGMOE3:
+        case LLM_ARCH_BAILINGHOE3_LEGACY:
         case LLM_ARCH_BAILINGMOE:
         case LLM_ARCH_NEO_BERT:
         case LLM_ARCH_SMOLLM3:

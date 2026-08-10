@@ -106,6 +106,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_BAILINGMOE,       "bailingmoe"       },
     { LLM_ARCH_BAILINGMOE2,      "bailingmoe2"      },
     { LLM_ARCH_BAILINGMOE3,      "bailingmoe3"      },
+    { LLM_ARCH_BAILINGHOE3_LEGACY, "bailing-hybrid"  }, // legacy alias from early BailingMoeV3 conversions
     { LLM_ARCH_DOTS1,            "dots1"            },
     { LLM_ARCH_ARCEE,            "arcee"            },
     { LLM_ARCH_AFMOE,            "afmoe"            },
@@ -1025,6 +1026,7 @@ bool llm_arch_is_hybrid(const llm_arch & arch) {
         case LLM_ARCH_NEMOTRON_H_MOE:
         case LLM_ARCH_QWEN3NEXT:
         case LLM_ARCH_BAILINGMOE3:
+        case LLM_ARCH_BAILINGHOE3_LEGACY:
         case LLM_ARCH_KIMI_LINEAR:
         case LLM_ARCH_KIMI_K3:
         case LLM_ARCH_QWEN35:
