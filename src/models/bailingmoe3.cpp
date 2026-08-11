@@ -338,6 +338,12 @@ llama_model_bailingmoe3::graph::graph(const llama_model & model, const llm_graph
             ggml_tensor * ssm_states_all = mctx_cur->get_s_l(il);
             ggml_tensor * state = build_rs(inp_rs, ssm_states_all, hparams.n_embd_s(), n_seqs);
             state = ggml_reshape_4d(ctx0, state, head_dim, head_dim, n_head, n_seqs);
+            // M4-A: with LING_KDA_STATE_F16=1 the cache holds f16; ggml_gated_delta_net
+            // asserts f32 input. Cast here (f16->f32 is exact); the cpy back to the
+            // f16 cache below does the single rounding on store (escha design).
+            if (ssm_states_all->type != GGML_TYPE_F32) {
+                state = ggml_cast(ctx0, state, GGML_TYPE_F32);
+            }
 
             const float eps_norm = hparams.f_norm_rms_eps;
 
