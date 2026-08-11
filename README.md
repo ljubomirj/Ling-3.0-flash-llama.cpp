@@ -1,3 +1,112 @@
+# Ling-3.0-flash llama.cpp
+
+Custom llama.cpp fork with **BailingMoE3 (KDA + MLA hybrid)** architecture support
+for [inclusionAI/Ling-3.0-flash](https://huggingface.co/inclusionAI/Ling-3.0-flash)
+— a 124B-parameter MoE model (~5B active, 512 experts/8 used, 42 layers:
+35 KDA recurrent + 7 gated-MLA attention, one NextN/MTP head). Runs the
+canonical `bailingmoe3`-arch GGUF on Apple Silicon Metal.
+
+## Provenance
+
+| What | Hash | Date |
+|------|------|------|
+| Upstream llama.cpp merge base | `1c3c9674d` | 2026-08-04 |
+| AtomicBot fork head (`feat/bailingmoe3`) | `b2629c04b` | (PR #67 swiglu-clamp) |
+| LJ fork point on `ljubomirj/llama.cpp` | `d2367bbe2` | 2026-08-10 |
+| This repo head (`main`) | `cff282561` | 2026-08-11 |
+
+Lineage: [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) →
+[AtomicBot-ai/atomic-llama-cpp-turboquant](https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant)
+(`feat/bailingmoe3`) → [ljubomirj/llama.cpp](https://github.com/ljubomirj/llama.cpp)
+branch `atomic-bailingmoe3` → this standalone repo (for GitHub pinning).
+
+**Source of truth (living branch):** `~/llama.cpp/worktrees/atomic-bailingmoe3`
+(branch `atomic-bailingmoe3` on `ljubomirj/llama.cpp`). This repo is a snapshot
+for pinning; **port advances from the branch** with:
+
+```bash
+git remote add lj git@github.com:ljubomirj/llama.cpp.git   # once
+git fetch lj atomic-bailingmoe3
+git merge --ff-only lj/atomic-bailingmoe3                  # or cherry-pick specific commits
+```
+
+The branch keeps evolving (new canonical GGUFs, kernel experiments). Anything
+landed there — fused-kernel work, loader fixes, quantization pipeline updates —
+ports here with the commands above.
+
+## What's changed from upstream / the atomic fork
+
+- **`bailingmoe3` architecture support** (`src/models/bailingmoe3.cpp`) — the
+  hybrid KDA+MLA graph from the AtomicBot fork, with LJ additions:
+  - **Legacy `bailing-hybrid` alias** (`LLM_ARCH_BAILINGHOE3_LEGACY`) — loads
+    early aj9o9-format GGUFs (raw `A_log` → in-graph `exp`; missing
+    `kda.gate_lower_bound` → default `-5.0`). Kept for the shim files, unused
+    by canonical GGUFs.
+  - **`ssm_f_a`/`ssm_g_a` → `ssm_f`/`ssm_g` alias** — the PR-26608 converter
+    emits the `_a` names; full-rank when `no_kda_lora`.
+  - **NextN (MTP) layer tensor loading** (`blk.42`) — the PR-26608 converter
+    emits a full 43rd layer; trunk graph excludes it, loader consumes the
+    tensors so `done_getting_tensors` passes.
+- **Canonical GGUF pipeline** — `inclusionAI/Ling-3.0-flash` bf16 (240 GB) →
+  aetherbird (PR #26608) `bailingmoe3.py` f16 → `llama-quantize IQ4_XS` →
+  `Ling-3.0-flash-bailingmoe3-IQ4_XS.gguf` (68.5 GB, arch `bailingmoe3`,
+  exp'd `ssm_a`, gate bound in-file). Loads with **no shim, no override**.
+
+## Research summary (2026-08-10/11)
+
+- **Baseline** (canonical IQ4_XS, M2 Max, `llama-bench -r 2`):
+  pp2048 **301.5** t/s @ d0, **154.4** @ d29664; tg128 **35.0** @ d0,
+  **24.3** @ d29664.
+- **Decode is memory-BW-bound** (~0.37 TB/s ≈ M2 Max ceiling at tg128 36 t/s).
+  Fused expert GEMMs cannot raise a BW-bound decode; de-scoped.
+- **Prefill-at-depth collapse is MLA q·k^T compute** (16.8 TFLOP @ 32K depth),
+  not KV-read bandwidth, not KDA. Flash-attn on already wins at prefill
+  (+6% @ pp2048, +16% @ pp256). ds4 split-K prefill port **not done** — the
+  fork's vec kernel is decode-only (Metal status 5 at prefill) and ds4's
+  prefill split-K is fused to their custom runtime.
+- **KDA fusion already active** — fused GDN (autoregressive + chunked) and
+  batched ssm_conv Metal kernels resolve enabled in this build.
+- **f16 GDN state experiment (M4-A)** — escha-mlx technique; measured
+  NEGATIVE at B=1 (−10..−16% tg): state is only ~1.5% of the B=1 step, and
+  the graph cast/cpy dispatches cost more than the traffic saved. History:
+  `7ca02d0ed` (experiment) + `cff282561` (revert) — re-diffable for a future
+  B≥16 batched-decode variant.
+- **Golden logits reference** — `golden-hf-bf16.json` (HF bf16, 16 steps,
+  vocab 157184) captured via a torch shim of fla-core's KDA kernels (triton is
+  unavailable on macOS). Validated both shim and canonical paths: gate math
+  source-verified against fla's kernel, step-0/1 logits match within IQ4_XS
+  noise; later divergence is near-tie argmax flips compounding through the
+  recurrent state — no graph bug.
+
+Full analysis: `~/llama.cpp/plans/ling-3.0-flash-speedup/PLAN.md` (+
+`PLAN-native-reconversion-m2.md`).
+
+## Quick start
+
+```bash
+git clone git@github.com:ljubomirj/Ling-3.0-flash-llama.cpp.git
+cd Ling-3.0-flash-llama.cpp
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DGGML_ACCELERATE=ON
+cmake --build build --config Release --target llama-cli llama-server -j8
+# model: Ling-3.0-flash-bailingmoe3-IQ4_XS.gguf (see plans/ling-3.0-flash-speedup)
+./build/bin/llama-cli -m <model> -ngl 99 -p "The capital of France is" -n 16
+```
+
+## Branch history highlights
+
+- `b2629c04b` — AtomicBot fork head (upstream of this line)
+- `d2367bbe2` — LJ baseline: aj9o9 IQ4_XS shim load (legacy `bailing-hybrid`)
+- `68bce126f` — canonical `bailingmoe3` GGUF created (loader aliases + NextN)
+- `874f919e2` — M4 resolved (KDA fusion already active), M5 investigated
+- `7ca02d0ed` / `cff282561` — M4-A f16-GDN-state experiment + revert
+
+---
+
+The original upstream llama.cpp README follows.
+
+---
+
 # Atomic llama.cpp
 
 ![atomic llama](https://github.com/AtomicBot-ai/.github/raw/main/assets/atomic%20llama.png)
