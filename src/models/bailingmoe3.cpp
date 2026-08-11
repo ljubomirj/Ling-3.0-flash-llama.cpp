@@ -34,6 +34,7 @@ void llama_model_bailingmoe3::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_EXPERT_SHARED_FEED_FORWARD_LENGTH, hparams.n_ff_shexp, false);
     ml.get_key(LLM_KV_EXPERT_SHARED_COUNT,               hparams.n_expert_shared);
     ml.get_key(LLM_KV_LEADING_DENSE_BLOCK_COUNT,         hparams.n_layer_dense_lead, false);
+    ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS,              hparams.n_layer_nextn,       false);
     ml.get_key(LLM_KV_EXPERT_WEIGHTS_SCALE,              hparams.expert_weights_scale, false);
     ml.get_key(LLM_KV_EXPERT_WEIGHTS_NORM,               hparams.expert_weights_norm, false);
     ml.get_key(LLM_KV_EXPERT_GATING_FUNC,                hparams.expert_gating_func);
@@ -86,8 +87,16 @@ void llama_model_bailingmoe3::load_arch_tensors(llama_model_loader &) {
             create_tensor_qkv(layer, i, n_embd, d_inner, d_inner, d_inner, 0);
 
             // full-rank forget/output gate projections (no_kda_lora)
-            layer.ssm_f = create_tensor(tn(LLM_TENSOR_SSM_F, "weight", i), {n_embd, d_inner}, 0);
-            layer.ssm_g = create_tensor(tn(LLM_TENSOR_SSM_G, "weight", i), {n_embd, d_inner}, 0);
+            // note: the upstream PR-26608 (aetherbird) converter stores these as
+            // ssm_f_a/ssm_g_a (full-rank when no_kda_lora); accept both names
+            layer.ssm_f = create_tensor(tn(LLM_TENSOR_SSM_F, "weight", i), {n_embd, d_inner}, TENSOR_NOT_REQUIRED);
+            if (!layer.ssm_f) {
+                layer.ssm_f = create_tensor(tn(LLM_TENSOR_SSM_F_A, "weight", i), {n_embd, d_inner}, 0);
+            }
+            layer.ssm_g = create_tensor(tn(LLM_TENSOR_SSM_G, "weight", i), {n_embd, d_inner}, TENSOR_NOT_REQUIRED);
+            if (!layer.ssm_g) {
+                layer.ssm_g = create_tensor(tn(LLM_TENSOR_SSM_G_A, "weight", i), {n_embd, d_inner}, 0);
+            }
 
             layer.ssm_beta = create_tensor(tn(LLM_TENSOR_SSM_BETA, "weight", i), {n_embd, n_head}, 0);
 
@@ -147,6 +156,51 @@ void llama_model_bailingmoe3::load_arch_tensors(llama_model_loader &) {
             layer.ffn_gate_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_SHEXP, "weight", i), {n_embd, n_ff_shexp}, 0);
             layer.ffn_down_shexp = create_tensor(tn(LLM_TENSOR_FFN_DOWN_SHEXP, "weight", i), {n_ff_shexp, n_embd}, 0);
             layer.ffn_up_shexp   = create_tensor(tn(LLM_TENSOR_FFN_UP_SHEXP,   "weight", i), {n_embd, n_ff_shexp}, 0);
+        }
+    }
+
+    // NextN (MTP) layer — the PR-26608 converter emits it as a full layer
+    // (attn + ffn + nextn heads) when the HF config has nextn_predict_layers.
+    // The trunk graph (n_layer()) excludes it; load its tensors so
+    // done_getting_tensors passes. Shapes mirror the trunk layer types.
+    {
+        const int64_t kv_lora_rank      = hparams.n_lora_kv;
+        const int64_t n_embd_head_k_mla = hparams.n_embd_head_k_mla();
+        const int64_t n_embd_head_v_mla = hparams.n_embd_head_v_mla();
+        const int64_t qk_rope_head_dim  = hparams.n_rot();
+        const int64_t n_ff_exp          = hparams.n_ff_exp;
+        const int64_t n_ff_shexp        = hparams.n_ff_shexp > 0 ? hparams.n_ff_shexp : n_ff_exp * hparams.n_expert_shared;
+
+        for (uint32_t i = n_layer; i < n_layer_all; ++i) {
+            const uint32_t flags = 0;
+            auto & layer = layers[i];
+            // attn (converter: nextn layer is_full_attention -> MLA-style)
+            layer.attn_norm  = create_tensor(tn(LLM_TENSOR_ATTN_NORM,  "weight", i), {n_embd}, flags);
+            layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_head * n_embd_head_v_mla, n_embd}, flags);
+            layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q, "weight", i), {n_embd, n_head * n_embd_head_k_mla}, flags);
+            layer.wkv_a_mqa = create_tensor(tn(LLM_TENSOR_ATTN_KV_A_MQA, "weight", i), {n_embd, kv_lora_rank + qk_rope_head_dim}, flags);
+            layer.attn_kv_a_norm = create_tensor(tn(LLM_TENSOR_ATTN_KV_A_NORM, "weight", i), {kv_lora_rank}, flags);
+            layer.wk_b = create_tensor(tn(LLM_TENSOR_ATTN_K_B, "weight", i), {n_embd_head_k_mla - qk_rope_head_dim, kv_lora_rank, n_head}, flags);
+            layer.wv_b = create_tensor(tn(LLM_TENSOR_ATTN_V_B, "weight", i), {kv_lora_rank, n_embd_head_v_mla, n_head}, flags);
+            layer.wqkv_gate = create_tensor(tn(LLM_TENSOR_ATTN_GATE, "weight", i), {n_embd, n_head}, flags);
+            layer.ffn_exp_probs_b = create_tensor(tn(LLM_TENSOR_FFN_EXP_PROBS_B, "bias", i), {n_expert}, flags);
+            // moe ffn
+            layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, flags);
+            layer.ffn_gate_inp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP, "weight", i), {n_embd, n_expert}, flags);
+            layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", i), {n_embd, n_ff_exp, n_expert}, flags);
+            layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", i), {n_ff_exp, n_embd, n_expert}, flags);
+            layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", i), {n_embd, n_ff_exp, n_expert}, flags);
+            layer.ffn_gate_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_SHEXP, "weight", i), {n_embd, n_ff_shexp}, flags);
+            layer.ffn_down_shexp = create_tensor(tn(LLM_TENSOR_FFN_DOWN_SHEXP, "weight", i), {n_ff_shexp, n_embd}, flags);
+            layer.ffn_up_shexp   = create_tensor(tn(LLM_TENSOR_FFN_UP_SHEXP,   "weight", i), {n_embd, n_ff_shexp}, flags);
+            // nextn heads
+            layer.nextn.eh_proj = create_tensor(tn(LLM_TENSOR_NEXTN_EH_PROJ, "weight", i), { 2 * n_embd, n_embd }, flags);
+            layer.nextn.enorm   = create_tensor(tn(LLM_TENSOR_NEXTN_ENORM,   "weight", i), { n_embd },         flags);
+            layer.nextn.hnorm   = create_tensor(tn(LLM_TENSOR_NEXTN_HNORM,   "weight", i), { n_embd },         flags);
+            layer.nextn.embed_tokens = create_tensor(tn(LLM_TENSOR_NEXTN_EMBED_TOKENS, "weight", i), { n_embd, n_vocab }, flags | TENSOR_NOT_REQUIRED);
+            layer.nextn.shared_head_head = create_tensor(tn(LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD, "weight", i), { n_embd, n_vocab }, flags | TENSOR_NOT_REQUIRED);
+            layer.nextn.shared_head_norm = create_tensor(tn(LLM_TENSOR_NEXTN_SHARED_HEAD_NORM, "weight", i), { n_embd }, flags | TENSOR_NOT_REQUIRED);
+            layer.layer_out_norm = create_tensor(tn(LLM_TENSOR_LAYER_OUT_NORM, "weight", i), { n_embd }, flags);
         }
     }
 }
