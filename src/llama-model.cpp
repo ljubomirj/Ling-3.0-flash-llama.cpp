@@ -2253,17 +2253,6 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             cparams.n_rs_seq,
                             nullptr);
                 } else if (llm_arch_is_hybrid(arch) && !mtp_on_hybrid_qwen) {
-                    // M4-A (2026-08-11): escha-mlx measured fp16 GDN recurrent
-                    // state (99.74% top-1, KL 2.78e-4, flat drift) — the kernel
-                    // loads f32, computes f32, casts only on store, so f16
-                    // storage costs one rounding per call, not per timestep.
-                    // Ling KDA: 35 layers x 32 heads x 128x128 f32 ~ 73 MB/seq,
-                    // read+written every decode step -> halves that traffic.
-                    // Env-gated for A/B: LING_KDA_STATE_F16=1.
-                    const char * f16_state = getenv("LING_KDA_STATE_F16");
-                    const bool kda_f16 = f16_state && f16_state[0] == '1' &&
-                        (arch == LLM_ARCH_BAILINGMOE3 || arch == LLM_ARCH_BAILINGHOE3_LEGACY);
-                    const ggml_type type_s = kda_f16 ? GGML_TYPE_F16 : GGML_TYPE_F32;
                     // The main difference between hybrid architectures is the
                     // layer filters, so pick the right one here
                     llama_memory_hybrid::layer_filter_cb filter_attn = nullptr;
@@ -2319,7 +2308,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* attn_n_swa        */ hparams.n_swa,
                             /* attn_swa_type     */ hparams.swa_type,
                             /* recurrent_type_k  */ GGML_TYPE_F32,
-                            /* recurrent_type_v  */ type_s,
+                            /* recurrent_type_v  */ GGML_TYPE_F32,
                             /* recurrent_kv_size */ std::max((uint32_t) 1, cparams.n_seq_max),
                             /* n_seq_max         */ cparams.n_seq_max,
                             /* n_rs_seq          */ cparams.n_rs_seq,
