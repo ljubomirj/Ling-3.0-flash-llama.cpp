@@ -2989,6 +2989,9 @@ bool ggml_metal_op_flash_attn_ext_use_vec(const ggml_tensor * op) {
             return false;  // force non-vec path
         }
     }
+    // NOTE (2026-08-11, M5): tried extending vec split-K to prefill (ne01>=20);
+    // Metal hard-crashes (status 5) — the vec kernel is decode-only (NQPSG=1,
+    // smem/grid/mask tuned for single-query). Reverted; see PLAN M5 note.
     return (ne01 < 20) && (ne00 % 32 == 0);
 }
 
